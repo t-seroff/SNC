@@ -1,0 +1,14 @@
+Tristan Seroff
+tristan_seroff
+3563301
+
+Simplified NetCat utility - snc
+First, the code parses input options and arguments. This is used by using the getopt function and comparisons to ensure that the option combination is valid and all required arguments are provided.
+
+I initially had some trouble with the remote address (the client's address when using -l, the server's address otherwise) being overwritten due to some sort of pointer issue - the problem was causing the address to be corrupted when I created pthreads, for some reason. I decided to just copy all data from parameters directly into the "connectionInfo" struct rather than copying struct pointers in as members of it, which solved the issue.
+
+UDP sending of packets when using -u and -l together wasn't working for a while because I forgot to initialize the addressSize variable for recvfrom(), so the remote address wasn't being saved for re-use. Once I initialized that length variable, recvfrom() properly saved the address and the program was able to send packets back successfully. I also call connect() with the client's address to ensure that packets are only received from the first client that sends one.
+
+Opening a connection with the -u option required adding a guard around the connect() function so that it is not called unless the utility is using TCP.
+
+The "#define DEBUG 0" statement can be changed to define the variable as 1 to view verbose debug message output.
