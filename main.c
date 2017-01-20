@@ -1,7 +1,7 @@
 // CS 176B Programming Assignment 1
 // Simplified NetCat utility - snc
 // Tristan Seroff, tristan_seroff, 3563301
-// Usage: snc [-l] [-u] [-s source_ip_address] hostname [port]
+// Usage: snc [-l] [-u] [-s source_ip_address] [hostname] port
 
 // Standard libraries
 #include <stdlib.h>
@@ -20,11 +20,25 @@
 #include <signal.h>
 #include <netdb.h>
 
-void sendInput(int sock);
-void printReceived(int sock);
+// Structure to pass necessary connection information into the two threads
+struct connectionInfo{
+  int sock;
+  int udp;
+  int source;
+  struct sockaddr_in *sourceAddress;
+  struct sockaddr_in *remoteAddress;
+};
+
+// Thread worker functions, forward declared
+void sendInput(struct connectionInfo *infoPtr);
+void printReceived(struct connectionInfo *infoPtr);
 
 int main (int argc, char **argv)
 {
+  struct connectionInfo info;
+  struct connectionInfo *infoPtr = &info;
+
+
   // ARGUMENT PARSING
 
   int parsingError = 0;
@@ -34,7 +48,12 @@ int main (int argc, char **argv)
   char *sourceIP = NULL;
   char *hostname = NULL;
   int portNum = -1;
-  struct in_addr sourceAddress;
+  struct in_addr sourceAddressInput;
+
+  struct sockaddr_in src; // Initialize
+  struct sockaddr_in rmt; // Initialize
+  struct sockaddr_in *sourceAddress = &src;
+  struct sockaddr_in *remoteAddress = &rmt;
 
   // Parse options
   char option;
@@ -56,7 +75,7 @@ int main (int argc, char **argv)
         sourceIP = optarg;
 
         // Check that source_ip_address is actually parseable.
-        if (inet_aton(sourceIP, &sourceAddress) == 0){
+        if (inet_aton(sourceIP, &sourceAddressInput) == 0){
           printf("source_ip_address was invalid or not present.\n");
           printf("A valid source_ip_address must be specified when using -s!\n");
           parsingError = 1;
@@ -124,7 +143,7 @@ int main (int argc, char **argv)
 
   // Print the correct usage and quit if there were any parsing errors.
   if (parsingError){
-    printf("Usage: snc [-l] [-u] [-s source_ip_address] hostname [port]\n");
+    printf("Usage: snc [-l] [-u] [-s source_ip_address] [hostname] port\n");
     exit(1);
   }
 
@@ -137,9 +156,12 @@ int main (int argc, char **argv)
   printf("hostname = %s, portNum = %d\n", hostname, portNum);
 
 
+
+
+
+
   // ACCEPT/CREATE CONNECTION
   int sock = 0; // Connected socket, to be populated below.
-  struct sockaddr_in source_addr; // Source address socket - only to be used if -s was chosen and -l was not.
 
   // Choose the main operation mode based on whether the -l option was chosen
   if (listenOpt){
@@ -160,24 +182,27 @@ int main (int argc, char **argv)
     }
 
     // Construct the listen-socket client address struct and populate it
-    struct sockaddr_in client_addr;
-    client_addr.sin_family = AF_INET;
-    client_addr.sin_port = htons(portNum);
+    struct sockaddr_in listen_addr;
+    listen_addr.sin_family = AF_INET;
+    listen_addr.sin_port = htons(portNum);
     struct in_addr listenAddress;
     if (hostname == NULL){    
       listenAddress.s_addr = INADDR_ANY;
+      printf("using 'any address'\n");
     }
     else{
       if(inet_aton(hostname, &listenAddress) == 0){
         printf("problem parsing hostname / host address.\n");
       }
+      printf("hostname is %s\n", inet_ntoa(listenAddress));
     }
-    client_addr.sin_addr = listenAddress;
+    listen_addr.sin_addr = listenAddress;
 
 
     // Bind the socket to the port/address combination specified
-    if (bind(server_sock, (struct sockaddr *) &client_addr, sizeof(client_addr)) != 0){
+    if (bind(server_sock, (struct sockaddr *) &listen_addr, sizeof(listen_addr)) != 0){
       printf("Error binding socket!\n");
+      exit(1);
     }
     printf("Socket is bound.\n");
 
@@ -186,19 +211,25 @@ int main (int argc, char **argv)
       // Listen on that newly-bound socket
       if (listen(server_sock, 5) != 0){
         printf("Error listening!\n");
+        exit(1);
       }
       printf("Listening for an incoming connection.\n");
     
       // Accept incoming connections, which creates a new socket and connection-socket client address struct
-      struct sockaddr clientAddress;
+      struct sockaddr_in clientAddress;
       socklen_t cliAddrSize;
       printf("Waiting to accept a connection.\n");
-      sock = accept(server_sock, &clientAddress, &cliAddrSize);
+      sock = accept(server_sock, (struct sockaddr *) &clientAddress, &cliAddrSize);
       printf("Socket connected!\n");
+      remoteAddress = &clientAddress;
     }
     else{
       sock = server_sock;
+      remoteAddress = &listen_addr; // TODO: IS THIS RIGHT?
     }
+    sourceAddress = NULL; // The -s flag cannot be used concurrently with the -l flag.
+    remoteAddress->sin_addr = listenAddress;
+    
   }
   else{
     // Open the connection as a client
@@ -218,49 +249,85 @@ int main (int argc, char **argv)
       client_sock = socket(AF_INET, SOCK_STREAM, 0);
     }
 
+    // Create the address struct for the server we're going to connect to
     struct sockaddr_in server_addr;
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(portNum);
     struct in_addr hostAddress;
     if(inet_aton(hostname, &hostAddress) == 0){
       printf("problem parsing hostname / host address.\n");
+      exit(1);
     }
     server_addr.sin_addr = hostAddress;
     
-    sock = connect(client_sock, (struct sockaddr *) &server_addr, sizeof(server_addr));
-    printf("Socket connected!\n");
+    // Connect the socket to that server
+    int code = connect(client_sock, (struct sockaddr *) &server_addr, sizeof(server_addr));
+    if (code == 0){
+      printf("Socket connected!\n");
+      sock = client_sock;
+    }
+    else{
+      printf("Could not connect socket\n");
+      exit(1);
+    }
     
     if (source){
       // Construct the outgoing 'source' address struct and populate it
-
+      struct sockaddr_in source_addr;
       source_addr.sin_family = AF_INET;
       source_addr.sin_port = htons(9999); // Change this later?
       if (sourceIP == NULL){    
-        sourceAddress.s_addr = INADDR_ANY;
+        sourceAddressInput.s_addr = INADDR_ANY;
       }
       // Otherwise the argument parsing already did the copy+conversion here.
-      source_addr.sin_addr = sourceAddress;
+      source_addr.sin_addr = sourceAddressInput;
+
+      sourceAddress = &source_addr; // Use the provided source IP, and... a default port?
     }
+    else{
+      sourceAddress = NULL;
+    }
+    
+    remoteAddress = &server_addr; // Use the address of the server we're connecting to as the remote address
   }
 
    
   
   // SEND/RECEIVE MESSAGES
 
+  // Build the information struct to pass to the two threads.
+  info.sock = sock;
+  info.udp = udp;
+  info.source = source;
+  info.sourceAddress = sourceAddress;
+  info.remoteAddress = remoteAddress;
+  printf("hostname is %s\n", inet_ntoa(info.remoteAddress->sin_addr));
+
+
+  printf("remoteAddress ptr is %d\n", (int) infoPtr->remoteAddress);
+  printf("remoteAddress.sin_port is %d\n", ntohs(infoPtr->remoteAddress->sin_port));
+
   // Create reading and printing threads, then wait for the input-reading one to join after a CTRL-D
   pthread_t sendThread;
+  printf("3. remoteAddress.sin_addr is %s (Memory location: %d)\n", inet_ntoa(info.remoteAddress->sin_addr), (int) &(info.remoteAddress->sin_addr));
+  pthread_create(&sendThread, NULL, (void *)sendInput, (void *) infoPtr);
+  printf("4. remoteAddress.sin_addr is %s (Memory location: %d)\n", inet_ntoa(info.remoteAddress->sin_addr), (int) &(info.remoteAddress->sin_addr));
   pthread_t printThread;
-  pthread_create(&sendThread, NULL, (void *)sendInput, (void *) sock);
-  pthread_create(&printThread, NULL, (void *)printReceived, (void *) sock);
-  //sleep(3);
+  printf("Creating second thread...\n");
+  pthread_create(&printThread, NULL, (void *)printReceived, (void *) infoPtr);
+  printf("6. remoteAddress.sin_addr is %s (Memory location: %d)\n", inet_ntoa(info.remoteAddress->sin_addr), (int) &(info.remoteAddress->sin_addr));
   pthread_join(sendThread, NULL);
+
   printf("Exiting.\n");
   exit(0);
 }
 
-void sendInput(int sock){
+void sendInput(struct connectionInfo *infoPtr){
   // Read input from stdin and send every line over the socket
   printf("Read+send thread started!\n");
+
+  printf("5. SEND THREAD remoteAddress.sin_addr is %s (Memory location: %d)\n", inet_ntoa(infoPtr->remoteAddress->sin_addr), (int) &(infoPtr->remoteAddress->sin_addr));
+
 
   // Loop reading from stdin, send each line after it is entered.
   char *input;
@@ -274,7 +341,14 @@ void sendInput(int sock){
       }
       // Otherwise send the line
       else{
-        send(sock, input, inputSize-1, 0);
+        if (infoPtr->udp){
+          // If UDP, specify the destination
+          sendto(infoPtr->sock, input, inputSize-1, 0, (struct sockaddr *) infoPtr->remoteAddress, sizeof(*(infoPtr->remoteAddress)));
+        }
+        else{
+          // If TCP, just send using the existing socket settings.
+          send(infoPtr->sock, input, inputSize-1, 0);
+        }
       }
     }
   }
@@ -285,17 +359,20 @@ void sendInput(int sock){
   
 }
 
-void printReceived(int sock){
+void printReceived(struct connectionInfo *infoPtr){
   printf("Receive+print thread started!\n");
 
   int bufferSize = 100;
   char buffer[bufferSize];
 
+  int msgLen = 0;
   while(1){
-    recv(sock, buffer, 100, 0);
-    if (buffer[0] == -1){ // EOF
-      exit(0);
+    msgLen = recv(infoPtr->sock, buffer, 100, 0);
+    if (msgLen > 0){
+      if (buffer[0] == -1){ // EOF
+        exit(0);
+      }
+      printf("Message received is: %s", buffer);
     }
-    printf("Message received is: %s", buffer);
   }
 }
