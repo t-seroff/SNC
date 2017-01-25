@@ -8,6 +8,7 @@
 #include <stdio.h>       // I/O - printf(), getline, stdin
 #include <unistd.h>      // Shell option and argument handling
 #include <pthread.h>     // POSIX threads
+#include <string.h>      // memset()
 
 // Transport-layer libraries
 #include <sys/socket.h>  // Sockets!
@@ -17,12 +18,14 @@
 #include <netinet/in.h>  // in_addr struct, among other constants
 #include <netdb.h>       // getaddrinfo, addrinfo struct
 
-#include <string.h>
+// Guard variable for verbose debug printout
+#define DEBUG 0
 
 // Structure to pass necessary connection information into the two threads
 struct connectionInfo{
   int sock;
   int udp;
+  int udpConnected;
   int listen;
   int source;
   struct sockaddr_in *sourceAddress;
@@ -76,8 +79,10 @@ int main (int argc, char **argv)
 
         // Check that source_ip_address is actually parseable.
         if (inet_aton(sourceIP, &sourceAddress->sin_addr) == 0){
-          printf("source_ip_address was invalid or not present.\n");
-          printf("A valid source_ip_address must be specified when using -s!\n");
+          if (DEBUG){
+            printf("source_ip_address was invalid or not present.\n");
+            printf("A valid source_ip_address must be specified when using -s!\n");
+          }
           parsingError = 1;
         }
 
@@ -85,17 +90,21 @@ int main (int argc, char **argv)
       }
       // Invalid option, or '-s' used without providing source_ip_address
       case '?':{
-        if (optopt == 's'){
-          printf("source_ip_address must be specified when using -s!\n");
+        if (DEBUG){
+          if (optopt == 's'){
+            printf("source_ip_address must be specified when using -s!\n");
+          }
+          else{
+            printf("Invalid option provided: '-%c'\n", optopt);
+          }
         }
-        else{
-          printf("Invalid option provided: '-%c'\n", optopt);
-          parsingError = 1;
-        }
+        parsingError = 1;
         break;
       }
       default:{
-        printf("Option parsing error.\n");
+        if (DEBUG){
+          printf("Option parsing error.\n");
+        }
         parsingError = 1;
         break;
       }
@@ -104,7 +113,9 @@ int main (int argc, char **argv)
   
   // Check that '-l' and '-s' are not used together!
   if (listenOpt && source){
-    printf("The '-l' and '-s' flags cannot be used concurrently!\n");
+    if (DEBUG){
+      printf("The '-l' and '-s' flags cannot be used concurrently!\n");
+    }
     parsingError = 1;
   }  
 
@@ -115,7 +126,9 @@ int main (int argc, char **argv)
       // Only one argument provided - Check if this is allowed based on the option flags provided.
       if (!listenOpt){
         // If connecting, check that there's a hostname
-        printf("The hostname must be specified if the -l option is not provided!\n");
+        if (DEBUG){
+          printf("The hostname must be specified if the -l option is not provided!\n");
+        }
         parsingError = 1;
       }
       
@@ -132,7 +145,6 @@ int main (int argc, char **argv)
       // First try to convert it as a normal IP address
       if(inet_aton(hostname, &remoteAddress->sin_addr) == 0){
         // If the conversion failed, try to resolve it as a domain/hostname instead
-        printf("Resolving hostname to an IP first.\n");
 
         // Build the "hints" struct to be used by getaddrinfo()
         struct addrinfo hints;
@@ -148,34 +160,35 @@ int main (int argc, char **argv)
         // Build an addrinfo struct and pointer to it, for getaddrinfo() to use
         struct addrinfo hostinfo;
         struct addrinfo *hostinfoPtr = &hostinfo;
-        printf("argv is %s\n", argv[optind+1]);
  
         // Resolve the hostname into an address
         int ret = getaddrinfo(hostname, argv[optind+1], &hints, &hostinfoPtr);
         if (ret != 0){
+          printf("internal error\n");
           printf("Error resolving hostname.\n");
         }
         else{
-          printf("Hostname resolved successfully.\n");
           struct sockaddr_in *tempPtr = (struct sockaddr_in *) hostinfoPtr->ai_addr;
-          printf("Hostname %s resolved to IP address %s\n", hostname, inet_ntoa(tempPtr->sin_addr));
+          if (DEBUG){
+            printf("Hostname '%s' successfully resolved to IP address %s\n", hostname, inet_ntoa(tempPtr->sin_addr));
+          }
 
           // Save the newly-resolved IP address into the socket address struct, to be used for connecting
           remoteAddress->sin_addr = tempPtr->sin_addr;
         }
       }
-      else{
+      else if (DEBUG){
         printf("Hostname was a validly-formatted IP address.\n");
       }
 
     }
-    else{
+    else if (DEBUG){
       // No arguments provided!
       printf("You must specify a port number!\n");
     }
     
     // If unable to parse the port number, return an error and quit
-    if (portNum == 0 || portNum == -1){
+    if ((portNum == 0 || portNum == -1) && DEBUG){
       printf("Un-parseable port number specified. Did you supply a hostname but no port number?\n");
       parsingError = 1;
     }
@@ -188,15 +201,12 @@ int main (int argc, char **argv)
     printf("usage: snc [-l] [-u] [-s source_ip_address] [hostname] port\n");
     exit(1);
   }
-
-  // Possible TODO: check that there weren't extra arguments (such as providing source_ip_address without '-s')?
-  // This will likely cause the port number to be unparseable anyways
-  // Concern - source IP provided and being interpreted as hostname - validate this somehow?
   
-  // If parsing finished successfully, print the parsed arguments
-  printf("listenOpt = %d, udp = %d, source = %d, sourceIP = %s\n", listenOpt, udp, source, sourceIP);
-  printf("hostname = %s, portNum = %d\n", hostname, portNum);
-
+  if (DEBUG){
+    // If parsing finished successfully, print the parsed arguments
+    printf("listenOpt = %d, udp = %d, source = %d, sourceIP = %s\n", listenOpt, udp, source, sourceIP);
+    printf("hostname = %s, portNum = %d\n", hostname, portNum);
+  }
 
   // ACCEPT/CREATE CONNECTION
 
@@ -211,7 +221,9 @@ int main (int argc, char **argv)
     //   Use TCP unless the -u option was chosen
     //   Listen on the provided host name if provided
   
-    printf("Listening for incoming socket connection.\n");
+    if (DEBUG){
+      printf("Listening for incoming socket connection.\n");
+    }
 
     // Create the listen-socket, using the selected transport protocol
     int server_sock;
@@ -227,38 +239,44 @@ int main (int argc, char **argv)
     remoteAddress->sin_port = htons(portNum);
     if (hostname == NULL){    
       remoteAddress->sin_addr.s_addr = INADDR_ANY;
-      printf("Using 'any address', since no hostname was specified\n");
-    }
-    // If a hostname was specified as an argument, it should already have been copied.
-    /*
-    else{
-      if(inet_aton(hostname, &remoteAddress->sin_addr) == 0){
-        printf("Problem parsing hostname / host address.\n");
+      if (DEBUG){
+        printf("Using 'any address', since no hostname was specified\n");
       }
     }
-    */
+    // If a hostname was specified as an argument, it should already have been copied.
 
     // Bind the socket to the port/address combination specified
     if (bind(server_sock, (struct sockaddr *) remoteAddress, sizeof(*remoteAddress)) != 0){
+      printf("internal error\n");
       printf("Error binding socket!\n");
       exit(1);
     }
-    printf("Socket is bound.\n");
+    if (DEBUG){
+      printf("Socket is bound.\n");
+    }
 
     // Accept a new socket connection via listening to the existing socket, for TCP. Otherwise just use the socket.
     if(!udp){
       // Listen on that newly-bound socket
       if (listen(server_sock, 5) != 0){
-        printf("Error listening!\n");
+        printf("internal error\n");
+        printf("Error listening on the socket!\n");
         exit(1);
       }
-      printf("Listening for an incoming connection.\n");
-    
+      if (DEBUG){
+        printf("Listening for an incoming connection.\n");
+      }
+
       // Accept incoming connections, which creates a new socket and connection-socket client address struct
       socklen_t cliAddrSize;
-      printf("Waiting to accept a connection.\n");
+      if (DEBUG){
+        printf("Waiting to accept a connection.\n");
+      }
       sock = accept(server_sock, (struct sockaddr *) remoteAddress, &cliAddrSize);
-      printf("Socket connected!\n");    }
+      if (DEBUG){
+        printf("Socket connected!\n");
+      }
+    }
     else{
       sock = server_sock;
     }
@@ -271,7 +289,9 @@ int main (int argc, char **argv)
     //   Use the provided hostname as the destination
     //   Use the provided source IP, if the -s option was specified
     
-    printf("Creating outgoing socket connection.\n");
+    if (DEBUG){
+      printf("Creating outgoing socket connection.\n");
+    }
 
     // Create the transmission-socket, using the selected transport protocol
     int client_sock;
@@ -285,47 +305,20 @@ int main (int argc, char **argv)
     // Create the address struct for the server we're going to connect to
     remoteAddress->sin_family = AF_INET;
     remoteAddress->sin_port = htons(portNum);
- 
-    /*
-    // Hostname should already have been copied at this point
-    if(inet_aton(hostname, &remoteAddress->sin_addr) == 0){
-      printf("problem parsing hostname / host address.\n");
-      exit(1);
-    }
-    */
   
-    /*
-    // TEST THIS
-    // Bind the source address to the socket, if provided
-    if (source){
-      // Construct the outgoing 'source' address struct and populate it
-      sourceAddress->sin_family = AF_INET;
-      sourceAddress->sin_port = htons(9999); // Change this later?
-      if (sourceIP == NULL){    
-        sourceAddress->sin_addr.s_addr = INADDR_ANY;
-      }
-      // Otherwise the argument parsing already did the copy+conversion here.
-      if (bind(client_sock, (struct sockaddr *) sourceAddress, sizeof(*sourceAddress)) != 0){
-        printf("Error binding socket!\n");
-        exit(1);
-      }
-    }
-    else{
-      sourceAddress = NULL;
-    }
-    */
-    
-
     // Connect the socket, if appropriate
     if (!udp){
       // For TCP, actively connect the socket to that remote server
       int code = connect(client_sock, (struct sockaddr *) remoteAddress, sizeof(*remoteAddress));
       if (code == 0){
-        printf("Socket connected!\n");
+        if (DEBUG){
+          printf("Socket connected!\n");
+        }
         sock = client_sock;
       }
       else{
         // Quit if there was an error connecting
+        printf("internal error\n");
         printf("Could not connect socket\n");
         exit(1);
       }
@@ -334,6 +327,26 @@ int main (int argc, char **argv)
       // For UDP, just use the socket as it's already been configured
       sock = client_sock;
     }
+
+    // Bind the source address to the socket, if provided
+    if (source){
+      // Construct the outgoing 'source' address struct and populate it
+      sourceAddress->sin_family = AF_INET;
+      sourceAddress->sin_port = htons(9999); // Any random port number will work, since it's outgoing
+      if (sourceIP == NULL){    
+        sourceAddress->sin_addr.s_addr = INADDR_ANY;
+      }
+      // Otherwise the argument parsing already did the copy+conversion here.
+      if (bind(client_sock, (struct sockaddr *) sourceAddress, sizeof(*sourceAddress)) != 0){
+        printf("internal error\n");
+        printf("Error binding socket to specified interface!\n");
+        exit(1);
+      }
+    }
+    else{
+      sourceAddress = NULL;
+    }
+
   }
 
 
@@ -343,6 +356,7 @@ int main (int argc, char **argv)
   // Build the information struct to pass to the two threads.
   info.sock = sock;
   info.udp = udp;
+  info.udpConnected = 0;
   info.source = source;
   info.listen = listenOpt;
   info.sourceAddress = sourceAddress;
@@ -359,39 +373,47 @@ int main (int argc, char **argv)
   pthread_join(sendThread, NULL);
   pthread_join(printThread, NULL);
 
-  printf("Exiting.\n");
+  if (DEBUG){
+    printf("Exiting.\n");
+  }
+  // One of the threads should exit, so we should never reach here.
   exit(0);
 }
 
 void sendInput(struct connectionInfo *infoPtr){
   // Read input from stdin and send every line over the socket
-  printf("Read+send thread started!\n");
-
-  //printf("SEND THREAD \nremoteAddress.sin_addr is %s, .sin_port is %d \n", inet_ntoa(infoPtr->remoteAddress->sin_addr), ntohs(infoPtr->remoteAddress->sin_port));
-
 
   // Loop reading from stdin, send each line after it is entered.
-  char *input;
-  size_t inputSize;
+  char *input = malloc(1);
+  size_t inputSize = 0;
   int done = 0;
   while(!done){
     if (getline(&input, &inputSize, stdin) != -1){
-      // Quit if q is entered
-      if (input[0] == 'q'){ // THIS NEEDS TO BE EOF from CTRL-D INSTEAD!
-        done = 1;
-      }
+      // Add a string termination character to the buffer to prevent printing issues
+      input[inputSize] = '\0';
       // Otherwise send the line
-      else{
-        if (infoPtr->udp){
-          // If UDP, specify the destination
-          sendto(infoPtr->sock, input, inputSize-1, 0, (struct sockaddr *) infoPtr->remoteAddress, sizeof(*infoPtr->remoteAddress));
-          printf("SEND THREAD \nremoteAddress.sin_addr is %s, .sin_port is %d \n", inet_ntoa(infoPtr->remoteAddress->sin_addr), ntohs(infoPtr->remoteAddress->sin_port));
-        }
+      if (infoPtr->udp){
+        // If UDP, specify the destination
+        if (infoPtr->listen){
+            // If listening, only send packets if we already know that there's a client
+          if (infoPtr->udpConnected){
+            // Send using the address provided to the call to connect()
+            send(infoPtr->sock, input, inputSize-1, 0);
+          }
+        } 
         else{
-          // If TCP, just send using the existing socket settings.
-          send(infoPtr->sock, input, inputSize-1, 0);
+          // Otherwise send to the address provided as input arguments
+          sendto(infoPtr->sock, input, inputSize-1, 0, (struct sockaddr *) infoPtr->remoteAddress, sizeof(*infoPtr->remoteAddress));
         }
       }
+      else{
+        // If TCP, just send using the existing socket settings.
+        send(infoPtr->sock, input, inputSize-1, 0);
+      }
+      // Clear the buffer and de-allocate it between inputs
+      memset(input, 0, inputSize);
+      free(input);
+      input = NULL;
     }
     else{
       // CTRL-D was pressed (signaling end of input text stream), so exit appropriately.
@@ -399,6 +421,7 @@ void sendInput(struct connectionInfo *infoPtr){
         // For TCP connections, close the connection and exit.
         int ret = close(infoPtr->sock);
         if (ret == -1){
+          printf("internal error\n");
           printf("Error closing socket!\n");
         }
         exit(0);
@@ -414,32 +437,32 @@ void sendInput(struct connectionInfo *infoPtr){
 
 void printReceived(struct connectionInfo *infoPtr){
   // Read from the socket and print messages as they arrive from the remote connection
-  printf("Receive+print thread started!\n");
 
   int bufferSize = 100;
   char buffer[bufferSize];
   int msgLen = 0;
-  //struct sockaddr_in address;
   socklen_t addressLen = sizeof(infoPtr->remoteAddress);
-  int udpConnected = 0; // Connect the socket to the first UDP client only
 
   // Loop reading the socket and printing the received messages
   while(1){
     msgLen = recvfrom(infoPtr->sock, buffer, 100, 0, (struct sockaddr *) infoPtr->remoteAddress, &addressLen);
     if (msgLen > 0){
-      if (buffer[0] == -1){ // EOF
-        exit(0);
-      }
+      // Print the message, if there was one received
+
       // Connect the socket to the first UDP client seen, if not already connected to one
-      if (infoPtr->udp && infoPtr->listen && !udpConnected){
+      if (infoPtr->udp && infoPtr->listen && !infoPtr->udpConnected){
         connect(infoPtr->sock, (struct sockaddr *) infoPtr->remoteAddress, addressLen);
-        udpConnected = 1;
+        infoPtr->udpConnected = 1;
       }
 
       // Put a string termination character in the buffer to prevent printing stale data
       buffer[msgLen] = '\0';
-      printf("Message received is: %s", buffer);
-      //printf("RECV THREAD \nremoteAddress.sin_addr is %s, .sin_port is %d addressLen is %d\n", inet_ntoa(infoPtr->remoteAddress->sin_addr), ntohs(infoPtr->remoteAddress->sin_port), addressLen);
+      printf("%s", buffer);
+    }
+    else if (msgLen == 0){
+      // If the remote side has closed the connection, exit the program.
+      close(infoPtr->sock);
+      exit(0);
     }
   }
 }
